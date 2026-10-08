@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """GR4-XPanUnlock: an XPan (65:24) aspect ratio for the RICOH GR IV (firmware 1.11).
 
-Replaces the 16:9 aspect ratio with XPan. Turns the official RICOH firmware file
-you downloaded yourself into the XPan version. A file is written only if every
-check passes.
+Replaces the 16:9 aspect ratio with XPan. In live view, XPan, 4:3 and 1:1 show
+the whole frame with the area outside the crop dimmed. Turns the official RICOH
+firmware file you downloaded yourself into the XPan version. A file is written
+only if every check passes.
 
 Usage
   python3 gr4_xpanunlock.py patch  OFFICIAL_fwdc248b.bin  [-o OUTPUT_DIR]
@@ -19,20 +20,22 @@ import sys
 import zlib
 from pathlib import Path
 
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 
 OFFICIAL_SHA256 = 'a2f664dfca034059eb0fd6e18ab08684c326b4a034d85c164dad7e1ec9b5655f'
 OFFICIAL_BYTES = 38648776
 
-UNLOCKED_SHA256 = 'fa2c67d1b67e16675a0c75b98d58c519b803f049a00e40e34103e54ca9a6a6c7'
+UNLOCKED_SHA256 = '4534d44297b69bb6d305bac2ad62fef98b0caf7a6558d6da36c049dbb88f80c8'
 
 # Other known GR IV 1.11 builds that this tool should not be fed (identified by `check`).
 OTHER_KNOWN = {
     '4c04b48c65897f2edd028df0f5e04666ca241488c81502bae0f34e040ee454eb': 'GR4-MonoUnlock 1.0.0 (monochrome looks unlocked)',
+    'fa2c67d1b67e16675a0c75b98d58c519b803f049a00e40e34103e54ca9a6a6c7': 'GR4-XPanUnlock 1.0.0 (16:9 replaced by XPan, letterboxed live view)',
 }
 
 # (payload offset, original bytes, new bytes, what it does)
 # Code and text in the RTOS section; all changes keep every size and address unchanged.
+# The live-view crop-marks routine is written in place over code the camera never runs.
 CHANGES = [
     (0x08e7d08, '983d00e3', 'f03800e3',
      'image size: 16:9 6192x3480 -> XPan 6192x2288'),
@@ -46,8 +49,6 @@ CHANGES = [
      'preview image placement: ScreenNail letterbox y 38 -> 107'),
     (0x08e7ec4, '1010a0e3', '1e10a0e3',
      'thumbnail placement: Thumbnail letterbox y 16 -> 30'),
-    (0x0899770, '98cd00e3', 'f0c800e3',
-     'live-view sensor window: LV 16:9 window height 3480 -> 2288'),
     (0x03b975c, '0940a0e3', '1840a0e3',
      'playback ratio detection: ratio term 9 -> 24'),
     (0x03b9764, '0142a0e1', '014381e0',
@@ -96,32 +97,6 @@ CHANGES = [
      'exposure/white-balance metering area: 16:9 crop2 BlockV 32 -> 20'),
     (0x089485c, '2040a0e3', '1440a0e3',
      'exposure/white-balance metering area: 16:9 crop2 BlockV 32 -> 20'),
-    (0x089f9fc, '0a0296e2', '000096e2',
-     'live-view display window: LV window H const low word (405<<29 -> 264<<29)'),
-    (0x089fa04, '3210a1e2', '2110a1e2',
-     'live-view display window: LV window H const high word 0x32 -> 0x21'),
-    (0x08a2cf8, '650fa003', '420fa003',
-     'live-view image height: LV VRAM V (base 480) 16:9 404 -> XPan 264'),
-    (0x08a2d64, '260ea003', '190ea003',
-     'live-view image height: LV VRAM V (base 720) 16:9 608 -> XPan 400'),
-    (0x08a2da0, '620fa003', '010ca003',
-     'live-view image height: LV VRAM V (base 464) 16:9 392 -> XPan 256'),
-    (0x08a2ddc, '5e0fa003', 'f800a003',
-     'live-view image height: LV VRAM V (base 448) 16:9 376 -> XPan 248'),
-    (0x08a2e7c, '5a0fa003', 'ec00a003',
-     'live-view image height: LV VRAM V (base 424) 16:9 360 -> XPan 236'),
-    (0x08a2edc, 'cc00a003', '8400a003',
-     'live-view image height: LV VRAM V (base 240) 16:9 204 -> XPan 132'),
-    (0x08a2f18, '150ea003', 'dc00a003',
-     'live-view image height: LV VRAM V (base 400) 16:9 336 -> XPan 220'),
-    (0x08a2f5c, '7f0fa003', '530fa003',
-     'live-view image height: LV VRAM V (base 600) 16:9 508 -> XPan 332'),
-    (0x08a2ff0, '5a0fa003', 'ec00a003',
-     'live-view image height: LV VRAM V (base 424) 16:9 360 -> XPan 236'),
-    (0x08a30c0, 'b400a003', '7400a003',
-     'live-view image height: LV VRAM V (base 212) 16:9 180 -> XPan 116'),
-    (0x08a3110, 'd800a003', '8c00a003',
-     'live-view image height: LV VRAM V (base 256) 16:9 216 -> XPan 140'),
     (0x03b6468, '020050e3', '010050e3',
      'focus area limits: aspect<=1 keeps the 3:2 rect (16:9 slot leaves the shared path)'),
     (0x03b648c, '28380de3', '740100e3',
@@ -184,6 +159,58 @@ CHANGES = [
      'playback camera-size check: native size 2688x1512 -> 2688x992'),
     (0x03ba788, '510e54e3', '350e54e3',
      'playback camera-size check: native size 2304x1296 -> 2304x848'),
+    (0x08a44f4, 'f0c78853', '1cc88853',
+     'live view: 4:3 shows the whole 3:2 frame (live-view aspect map entry 1 -> 3:2)'),
+    (0x08a44f8, '2cc88853', '1cc88853',
+     'live view: XPan shows the whole 3:2 frame (live-view aspect map entry 2 -> 3:2)'),
+    (0x08a44fc, '24c88853', '1cc88853',
+     'live view: 1:1 shows the whole 3:2 frame (live-view aspect map entry 3 -> 3:2)'),
+    (0x08e7310,
+     ('602507e300308de5fd1345e3fd2345e33a30a0e3c57800eb000054e3b8ffff0a'
+      '030057e307f19f97470000eaa8f68c5390f68c5378f68c5358f68c53030057e3'
+      '07f19f979f0000ea24f88c5314f88c53e4f78c5334f88c531e2da0e3053ca0e3'
+      'b020c8e1b030c9e124d04be2f0ab9de8000054e35400000ad22ea0e3233da0e3'
+      'b020c8e1b030c9e124d04be2f0ab9de84b2da0e3323da0e3b020c8e1b030c9e1'
+      '24d04be2f0ab9de8702701e3fa3ea0e3b020c8e1b030c9e124d04be2f0ab9de8'
+      '6c3908e3201806e3fd3345e3602507e300308de5fd1345e3fd2345e34630a0e3'
+      '927800eb86ffffea6c3908e3201806e3fd3345e3602507e300308de5fd1345e3'
+      'fd2345e30000a0e33d30a0e3877800ebc0ffffea030057e307f19f975d0000ea'
+      'b8f78c53a4f78c5390f78c537cf78c53030057e307f19f976e0000ea84f88c53'
+      '70f88c5358f88c5344f88c536c3908e3201806e3fd3345e3602507e304308be5'
+      'fd1345e3fd2345e30000a0e35330a0e324d04be2f06b9de86c7800ea1e2da0e3'
+      '5a3ea0e3b020c8e1b030c9e1b5ffffeabb2ea0e3233da0e3b020c8e1b030c9e1'
+      'b0ffffeab02001e3323da0e3b020c8e1b030c9e1abffffead02401e3fa3ea0e3'
+      'b020c8e1b030c9e1a6ffffea010055e3eeffff0a000056e31e00001a030055e3'
+      '4dffff1a233da0e3b030c8e1b030c9e19cffffea000054e3a4ffff1a010055e3'
+      'e7ffff0a000056e31800001a030055e341ffff1a323da0e3b030c8e1b030c9e1'
+      '90ffffeafa3ea0e3b030c8e1b030c9e18cffffea053ca0e3b030c8e1b030c9e1'
+      '88ffffea1e2da0e3383400e3b020c8e1b030c9e183ffffea'),
+     ('0000000000000000000000000000000000000000000000000000000000000000'
+      '0000000000000000000000000000000000000000000000000000000000000000'
+      '00000000000000000000000000000000000000000000000028000000e0010000'
+      '10000000a80200000000000028000000e0010000100000002600000000000000'
+      '02000000e001000002000000a80200000000000002000000e001000002000000'
+      '0000000000000000d00200006b000000100000000000000075010000d0020000'
+      '6b000000100000000000000069000000d0020000020000000200000000000000'
+      '75010000d00200000200000002000000000000000000000078000000e0010000'
+      '10000000580200000000000078000000e0010000100000007600000000000000'
+      '02000000e001000002000000580200000000000002000000e001000002000000'
+      '0dc0a0e1f0d82de904b04ce218d04de20040a0e10150a0e1f430d4e5020053e3'
+      '0900003a0600000a033043e2f430c4e534a4f2ebf430d4e5033083e2f430c4e5'
+      '030000ea49e2f2eb010000ea2da4f2eb1e0000eababce5eb1ebee5ebbf25e7eb'
+      '030050e31900008a00660fe38c6345e3006286e0006386e00470a0e3083096e5'
+      '000053e30e00000a00508de5003096e504308de5043096e508308de5083096e5'
+      '0c308de50c3096e510308de5103096e51430cde5efb0e5eb4cb1e5eb0d10a0e1'
+      '60b3e5eb146086e2017057e2eaffff1a1cd04be2f0a89de80dc0a0e118d82de9'
+      '04b04ce20040a0e1eaa3f2ebf430d4e5033083e2f430c4e514d04be218a89de8'
+      '0600a0e10210a0e31020a0e3e1a3f2eb0150a0e318fee2ea'),
+     'live-view crop marks: 150-word drawing routine and per-ratio dim/line table, written over unused code (the dead Kb588 GetResolution)'),
+    (0x0eb0934, '48885753', '40f78c53',
+     'live-view crop marks: grid view draw -> crop-marks routine (draws the stock grid first)'),
+    (0x01a6e68, '9ea50feb', 'ae011deb',
+     'live-view crop marks: live-view grid setup -> stub that marks the live-view screen'),
+    (0x01a6e18, 'eaffff0a', 'cc011d0a',
+     'live-view crop marks: grid display off keeps the grid view shown, with no grid lines'),
     (0x0df0dc8, '05010000', '05010000',
      'menu label "16:9" -> "XPan" (Czech, length)'),
     (0x0deed30, '310036003a00390000000000', '5800500061006e0000000000',
