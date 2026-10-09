@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """GR4-XPanUnlock: an XPan (65:24) aspect ratio for the RICOH GR IV (firmware 1.11).
 
-Replaces the 16:9 aspect ratio with XPan. In live view, XPan, 4:3 and 1:1 show
-the whole frame with the area outside the crop dimmed. Turns the official RICOH
-firmware file you downloaded yourself into the XPan version. A file is written
-only if every check passes.
+Adds XPan as a fifth aspect ratio next to 16:9. In live view, XPan, 16:9,
+4:3 and 1:1 show the whole frame with the area outside the crop dimmed. Turns
+the official RICOH firmware file you downloaded yourself into the XPan
+version. A file is written only if every check passes.
 
 Usage
   python3 gr4_xpanunlock.py patch  OFFICIAL_fwdc248b.bin  [-o OUTPUT_DIR]
@@ -20,287 +20,444 @@ import sys
 import zlib
 from pathlib import Path
 
-VERSION = '1.1.0'
+VERSION = '2.0.0'
 
 OFFICIAL_SHA256 = 'a2f664dfca034059eb0fd6e18ab08684c326b4a034d85c164dad7e1ec9b5655f'
 OFFICIAL_BYTES = 38648776
 
-UNLOCKED_SHA256 = '4534d44297b69bb6d305bac2ad62fef98b0caf7a6558d6da36c049dbb88f80c8'
+UNLOCKED_SHA256 = 'aa9ac5dbb05d0e362019b78c678ac322fe9b6786d980cafe1846bf191f739cb0'
 
 # Other known GR IV 1.11 builds that this tool should not be fed (identified by `check`).
 OTHER_KNOWN = {
     '4c04b48c65897f2edd028df0f5e04666ca241488c81502bae0f34e040ee454eb': 'GR4-MonoUnlock 1.0.0 (monochrome looks unlocked)',
     'fa2c67d1b67e16675a0c75b98d58c519b803f049a00e40e34103e54ca9a6a6c7': 'GR4-XPanUnlock 1.0.0 (16:9 replaced by XPan, letterboxed live view)',
+    '4534d44297b69bb6d305bac2ad62fef98b0caf7a6558d6da36c049dbb88f80c8': 'GR4-XPanUnlock 1.1.0 (16:9 replaced by XPan)',
 }
 
 # (payload offset, original bytes, new bytes, what it does)
-# Code and text in the RTOS section; all changes keep every size and address unchanged.
-# The live-view crop-marks routine is written in place over code the camera never runs.
+# All changes keep every size and address unchanged. New routines are written in place over code the camera
+# never runs, and they only read from the firmware, never write to it.
 CHANGES = [
-    (0x08e7d08, '983d00e3', 'f03800e3',
-     'image size: 16:9 6192x3480 -> XPan 6192x2288'),
-    (0x08e7cf4, 'ae3ea0e3', '723ea0e3',
-     'image size: 16:9 4944x2784 -> XPan 4944x1824'),
-    (0x08e7cdc, '7b3ea0e3', '513ea0e3',
-     'image size: 16:9 3504x1968 -> XPan 3504x1296'),
-    (0x08e7cc8, '383400e3', 'c83200e3',
-     'image size: 16:9 1920x1080 -> XPan 1920x712'),
-    (0x08e7e0c, '2610a0e3', '6b10a0e3',
-     'preview image placement: ScreenNail letterbox y 38 -> 107'),
-    (0x08e7ec4, '1010a0e3', '1e10a0e3',
-     'thumbnail placement: Thumbnail letterbox y 16 -> 30'),
-    (0x03b975c, '0940a0e3', '1840a0e3',
-     'playback ratio detection: ratio term 9 -> 24'),
-    (0x03b9764, '0142a0e1', '014381e0',
-     'playback ratio detection: 16*S -> 65*S'),
-    (0x03ba8bc, '983d00e3', 'f03800e3',
-     'playback camera-size check: 16:9 height 3480 -> 2288'),
-    (0x03ba83c, 'ae0e54e3', '720e54e3',
-     'playback camera-size check: 16:9 height 2784 -> 1824'),
-    (0x03ba8a4, '7b0e54e3', '510e54e3',
-     'playback camera-size check: 16:9 height 1968 -> 1296'),
-    (0x03ba948, '383400e3', 'c83200e3',
-     'playback camera-size check: 16:9 XS height 1080 -> 712'),
-    (0x0894578, '82e100e3', 'eee300e3',
-     'exposure/white-balance metering area: 16:9 crop0 OriginV 386 -> 1006'),
-    (0x08945b0, '82e100e3', 'eee300e3',
-     'exposure/white-balance metering area: 16:9 crop0 OriginV 386 -> 1006'),
-    (0x08945f8, '82e100e3', 'eee300e3',
-     'exposure/white-balance metering area: 16:9 crop0 OriginV 386 -> 1006'),
-    (0x0894640, '82e100e3', 'eee300e3',
-     'exposure/white-balance metering area: 16:9 crop0 OriginV 386 -> 1006'),
-    (0x0894588, '38e0a0e3', '24e0a0e3',
-     'exposure/white-balance metering area: 16:9 crop0 BlockV 56 -> 36'),
-    (0x08945c8, '38e0a0e3', '24e0a0e3',
-     'exposure/white-balance metering area: 16:9 crop0 BlockV 56 -> 36'),
-    (0x0894610, '38e0a0e3', '24e0a0e3',
-     'exposure/white-balance metering area: 16:9 crop0 BlockV 56 -> 36'),
-    (0x0894664, '38e0a0e3', '24e0a0e3',
-     'exposure/white-balance metering area: 16:9 crop0 BlockV 56 -> 36'),
-    (0x0894698, 'f6e200e3', 'a8e400e3',
-     'exposure/white-balance metering area: 16:9 crop1 OriginV 758 -> 1192'),
-    (0x08946a0, '2c40a0e3', '1e40a0e3',
-     'exposure/white-balance metering area: 16:9 crop1 BlockV 44 -> 30'),
-    (0x08946e4, '2c40a0e3', '1e40a0e3',
-     'exposure/white-balance metering area: 16:9 crop1 BlockV 44 -> 30'),
-    (0x0894718, '2c40a0e3', '1e40a0e3',
-     'exposure/white-balance metering area: 16:9 crop1 BlockV 44 -> 30'),
-    (0x0894764, '2c40a0e3', '1e40a0e3',
-     'exposure/white-balance metering area: 16:9 crop1 BlockV 44 -> 30'),
-    (0x0894794, '6a4400e3', 'de4500e3',
-     'exposure/white-balance metering area: 16:9 crop2 OriginV 1130 -> 1502'),
-    (0x089479c, '2050a0e3', '1450a0e3',
-     'exposure/white-balance metering area: 16:9 crop2 BlockV 32 -> 20'),
-    (0x0894348, '2060a0e3', '1460a0e3',
-     'exposure/white-balance metering area: 16:9 crop2 BlockV 32 -> 20'),
-    (0x0894828, '2060a0e3', '1460a0e3',
-     'exposure/white-balance metering area: 16:9 crop2 BlockV 32 -> 20'),
-    (0x089485c, '2040a0e3', '1440a0e3',
-     'exposure/white-balance metering area: 16:9 crop2 BlockV 32 -> 20'),
-    (0x03b6468, '020050e3', '010050e3',
-     'focus area limits: aspect<=1 keeps the 3:2 rect (16:9 slot leaves the shared path)'),
-    (0x03b648c, '28380de3', '740100e3',
-     'focus area limits: XPan rect bottom 372 (r0)'),
-    (0x03b6490, 'd01803e3', '0a3da0e3',
-     'focus area limits: XPan rect right 640 (r3)'),
-    (0x03b6494, 'db3345e3', '6c20a0e3',
-     'focus area limits: XPan rect top 108 (r2)'),
-    (0x03b6498, 'e0280ce3', '5010a0e3',
-     'focus area limits: XPan rect left 80 (r1)'),
-    (0x03b649c, '00308de5', 'eaffffea',
-     'focus area limits: branch to shared Rect construction'),
-    (0x03b66b4, 'e8e93953', '50ea3953',
-     'auto-area focus size: mode-0 aspect table entry 2 -> XPan size block'),
-    (0x03b6760, '50380de3', '0500a0e1',
-     'auto-area focus size: XPan block: mov r0, r5'),
-    (0x03b6764, 'd01803e3', '231ea0e3',
-     'auto-area focus size: XPan block: width 560'),
-    (0x03b6768, 'db3345e3', '422fa0e3',
-     'auto-area focus size: XPan block: height 264'),
-    (0x03b676c, 'e0280ce3', 'c12d15eb',
-     'auto-area focus size: XPan block: bl Size::Set'),
-    (0x03b6770, '00308de5', 'afffffea',
-     'auto-area focus size: XPan block: b epilogue'),
-    (0x03f5e14, '982d00e3', 'f02800e3',
-     'playback Crop frame: Crop frame 6192x3480 -> 6192x2288'),
-    (0x03f5e24, 'a82c00e3', '502800e3',
-     'playback Crop frame: Crop frame 5760x3240 -> 5760x2128'),
-    (0x03f5e34, 'bd2ea0e3', '1f2da0e3',
-     'playback Crop frame: Crop frame 5376x3024 -> 5376x1984'),
-    (0x03f5e44, 'f82a00e3', '302700e3',
-     'playback Crop frame: Crop frame 4992x2808 -> 4992x1840'),
-    (0x03f5e54, 'ae2ea0e3', '722ea0e3',
-     'playback Crop frame: Crop frame 4944x2784 -> 4944x1824'),
-    (0x03f5e64, '482900e3', '182600e3',
-     'playback Crop frame: Crop frame 4224x2376 -> 4224x1560'),
-    (0x03f5e74, '872ea0e3', '592ea0e3',
-     'playback Crop frame: Crop frame 3840x2160 -> 3840x1424'),
-    (0x03f5e84, '7b2ea0e3', '512ea0e3',
-     'playback Crop frame: Crop frame 3504x1968 -> 3504x1296'),
-    (0x03f5e94, '1b2da0e3', '472ea0e3',
-     'playback Crop frame: Crop frame 3072x1728 -> 3072x1136'),
-    (0x03f5ea4, 'e82500e3', 'e02300e3',
-     'playback Crop frame: Crop frame 2688x1512 -> 2688x992'),
-    (0x03f5eb4, '512ea0e3', '352ea0e3',
-     'playback Crop frame: Crop frame 2304x1296 -> 2304x848'),
-    (0x03f5ec4, '382400e3', 'c82200e3',
-     'playback Crop frame: Crop frame 1920x1080 -> 1920x712'),
-    (0x03ba7c8, 'a83c00e3', '503800e3',
-     'playback camera-size check: native size 5760x3240 -> 5760x2128'),
-    (0x03ba7fc, 'bd0e54e3', '1f0d54e3',
-     'playback camera-size check: native size 5376x3024 -> 5376x1984'),
-    (0x03ba820, 'f83a00e3', '303700e3',
-     'playback camera-size check: native size 4992x2808 -> 4992x1840'),
-    (0x03ba864, '483900e3', '183600e3',
-     'playback camera-size check: native size 4224x2376 -> 4224x1560'),
-    (0x03ba88c, '870e54e3', '590e54e3',
-     'playback camera-size check: native size 3840x2160 -> 3840x1424'),
-    (0x03ba8d8, 'e83500e3', 'e03300e3',
-     'playback camera-size check: native size 2688x1512 -> 2688x992'),
-    (0x03ba788, '510e54e3', '350e54e3',
-     'playback camera-size check: native size 2304x1296 -> 2304x848'),
-    (0x08a44f4, 'f0c78853', '1cc88853',
-     'live view: 4:3 shows the whole 3:2 frame (live-view aspect map entry 1 -> 3:2)'),
-    (0x08a44f8, '2cc88853', '1cc88853',
-     'live view: XPan shows the whole 3:2 frame (live-view aspect map entry 2 -> 3:2)'),
-    (0x08a44fc, '24c88853', '1cc88853',
-     'live view: 1:1 shows the whole 3:2 frame (live-view aspect map entry 3 -> 3:2)'),
+    (0x01a6e18, 'eaffff0a', 'e0011d0a',
+     'live view: whole frame with the crop dimmed'),
+    (0x01a6e68, '9ea50feb', 'c2011deb',
+     'live view: whole frame with the crop dimmed'),
+    (0x01d1e5c, '0400a0e3', '0500a0e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01d20c0, '157816eb', '52041beb',
+     'image-size readout for XPan'),
+    (0x01d2c98, '34300be3db3345e3', 'f0350fe38c3345e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01d2f7c, '34300be3db3345e3', 'f0350fe38c3345e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01d602c, '34300be3', 'f0350fe3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01d6034, 'db3345e3', '8c3345e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01d8880, '255e16eb', '62ea1aeb',
+     'image-size readout for XPan'),
+    (0x01e6fa8, '0400a0e3', '0500a0e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01e89f8, '34300be3', 'f0350fe3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01e8a00, 'db3345e3', '8c3345e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01e8ad0, '911d16eb', 'cea91aeb',
+     'image-size readout for XPan'),
+    (0x01eac98, '34300be3db3345e3', 'f0350fe38c3345e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x01ec5b0, '34300be3db3345e3', 'f0350fe38c3345e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x022e01c, '030053e3', 'ce9419ea',
+     'Crop: XPan frames'),
+    (0x02558c4, '963200e3', '973200e3',
+     'XPan icon'),
+    (0x02558d0, '8fc606eb', '6ef618eb',
+     'XPan icon'),
+    (0x02558e4, '8ac606eb', '69f618eb',
+     'XPan icon'),
+    (0x025611c, '962200e3', '972200e3',
+     'XPan icon'),
+    (0x02561e4, '4ac406eb', '30f418eb',
+     'XPan icon'),
+    (0x0272b3c, '34300be3db3345e3', 'f0350fe38c3345e3',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x0272b74, '0000a003', '0400a003',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x03834a8, 'a0b73653', 'bcb73653',
+     'RAW Development: XPan choice'),
+    (0x03834d4, '0400a0e3', '0500a0e3',
+     'RAW Development: XPan choice'),
+    (0x0383628, '44b93653', '1cb68753',
+     'RAW Development: XPan choice'),
+    (0x038364c, '44b93653', '1cb68753',
+     'RAW Development: XPan choice'),
+    (0x0383674, '80380be3db3345e3', 'fc360be3873345e3',
+     'RAW Development: XPan choice'),
+    (0x03855b8, 'd8350be3db3345e3', '04370be3873345e3',
+     'RAW Development: XPan choice'),
+    (0x03855f0, '80380be3db3345e3', 'fc360be3873345e3',
+     'RAW Development: XPan choice'),
+    (0x038cda8, '040051e3', '581914ea',
+     'RAW Development: XPan choice'),
+    (0x03978e4, '0000a013', '09010013',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x0399178, '01208213000052e30000a013f000a003', '97020013f000a003000052e30000a013',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x03b648c, '28380de3d01803e3db3345e3e0280ce300308de5', '740100e30a3da0e36c20a0e35010a0e3eaffffea',
+     'focus area: limited to the picture'),
+    (0x03b6760, '50380de3d01803e3db3345e3e0280ce300308de5', '0500a0e1231ea0e3422fa0e3c12d15ebafffffea',
+     'focus area: limited to the picture'),
+    (0x03b976c, '2d00000a', '0a6613ea',
+     'playback: recognise XPan pictures'),
+    (0x03ba608, '0000a0e3', '586313ea',
+     'Crop: XPan sizes'),
+    (0x03f43f0, 'c43f01e3', '08370be3',
+     'Crop: XPan frames'),
+    (0x03f43f8, '003545e3', '873345e3',
+     'Crop: XPan frames'),
+    (0x03f473c, '030051e3', '040051e3',
+     'Crop: XPan frames'),
+    (0x03f47c4, 'c43f01e3003545e3', '08370be3873345e3',
+     'Crop: XPan frames'),
+    (0x03f484c, '0450a0e3', '0550a0e3',
+     'Crop: XPan frames'),
+    (0x03f4854, '030053e3', 'b97a12ea',
+     'Crop: XPan frames'),
+    (0x03f4864, '60cb3d53', '44b68753',
+     'Crop: XPan frames'),
+    (0x03f491c, '030050e3', '040050e3',
+     'Crop: XPan frames'),
+    (0x03f4948, '030053e3', '040053e3',
+     'Crop: XPan frames'),
+    (0x03f4978, 'c43f01e3003545e3', '08370be3873345e3',
+     'Crop: XPan frames'),
+    (0x03f4d60, 'c47f01e3', '08770be3',
+     'Crop: XPan frames'),
+    (0x03f4d6c, '007545e3', '877345e3',
+     'Crop: XPan frames'),
+    (0x03f4df4, 'd41f0055', '1cb78753',
+     'Crop: XPan frames'),
+    (0x03f50f0, 'c4cf01e3', '08c70be3',
+     'Crop: XPan frames'),
+    (0x03f50f8, '00c545e3', '87c345e3',
+     'Crop: XPan frames'),
+    (0x03f523c, 'c4ef01e3', '08e70be3',
+     'Crop: XPan frames'),
+    (0x03f5248, '00e545e3', '87e345e3',
+     'Crop: XPan frames'),
+    (0x03f5428, 'c43f01e3003545e3', '08370be3873345e3',
+     'Crop: XPan frames'),
+    (0x0712ebc, 'da27d2e5', '8a0006ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x0712f20, 'da27dce5', '790006ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x0712fc4, 'da17d1e5', '580006ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x071309c, 'da17d1e5', '2a0006ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x071a4b8, 'da27d3e5', '03e305ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x072399c, 'da17d1e5', 'babd05ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x07239e4, 'da17d1e5', 'b0bd05ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x0729154, 'da27d3e5', 'a4a705ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x0729314, 'da27dce5', '3ca705ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x077e6c0, '0dc0a0e1', 'd2a205ea',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x0892ed8,
+        '0dc0a0e1bc3904e3f0df2de9353445e304b04ce2028b2ded6cd04de2042090e5'
+        '7c300be5003093e5000052e358000be538300be5bd02000a18340fe3fc3345e3'
+        '70300be5c9bcffeb3810a0e3fbbcffeb000050e30070a00178700b054202001a'
+        'c2bcffeb8110a0e3f4bcffeb000050e30080a0010840a0018102001abbbcffeb'
+        '7710a0e3edbcffeb000050e35c02001a0630a0e36c300be50130a0e384300be5'
+        'b2bcffeb4010a0e3e4bcffeb000050e364000b054802001aacbcffeb9410a0e3'
+        'debcffeb000050e38c000b05fe3ea00368300b053302001a78301be5000054e3'
+        '0280a003000053e31702000a1c3087e2fdce87e27330ffe604c08ce25c300be5'
+        'fb9e83e27cc0ffe6089089e2063087e260300be558301be50060a0e380c00be5'
+        '0620a0e3044093e51630a0e3f40094e5c85094e588000be56c005be5ec1094e5'
+        'd8a094e5b080c5e1208085e2be20c5e1b031c5e1b670c5e1b860c5e1bc60c5e1'
+        '2800c5e574100be5b4654be1b2654be1ac5401eb085501eb003090e50070a0e1'
+        '0610a0e1343093e533ff2fe1003097e552204be200208de50700a0e1087093e5'
+        '0610a0e1408ab0ee0620a0e154304be237ff2fe184305be53820a0e3bc055be1'
+        '881701e32930c5e51c30a0e3bc31c5e1b83f00e3b422c5e10420a0e380c01be5'
+        'b202c5e1c40701e3be31c5e1b824cae174201be5b630cae1e03701e3b2c0cae1'
+        'b000cae10400a0e1b410cae10610a0e1b230c2e1b634cae1f1f4ffeb64301be5'
+        '0400a0e10010a0e3060053e10630a011ee30a00380300be5092063e08c301be5'
+        '0c2082e264701b05ee70a013022083e00360a0e364200be561f5ffeb0400a0e1'
+        '0110a0e354f5ffeb0400a0e10010a0e3abf5ffeb0400a0e10010a0e362f5ffeb'
+        '0400a0e10010a0e369f5ffeb0710a0e10400a0e1',
+        '0030a0e330c801e30c0050e1f03800030020a00350c301e30c0050e120370003'
+        '0120a003b0cd00e30c0050e1103500030220a00380c700e30c0050e1c8320003'
+        '0320a0031eff2fe1040052e37752011a0dc0a0e130d82de904b04ce200509ce5'
+        '0340a0e108d04de200508de50220a0e36e5201ebb000d4e1e0ffffeb000053e3'
+        'b030c51114d04be230a89de8040051e39553011a0000a0e36b10a0e3b000c2e1'
+        'b010c3e11eff2fe1040051e3bc53011a0000a0e31e10a0e3b000c2e1b010c3e1'
+        '1eff2fe1219aec0a09002de9010381e0823082e0830150e000006042a20150e1'
+        '0900bde80200a0933080bd98e999eceac2ffffeb000053e30300000a030054e1'
+        '0100001a0230a0e1ee9decea0000a0e3879decea03002de9db07d3e5010050e3'
+        'da27d3e5020052030420a0030300bde85258faea03002de9db07dce5010050e3'
+        'da27dce5020052030420a0030300bde8ba58faea03002de9db07d8e5010050e3'
+        'da27d8e5020052030420a0030300bde81d2800ea05002de9db07d1e5010050e3'
+        'da47d1e5020054030440a0030500bde8cf2700ea05002de9db07d1e5010050e3'
+        'da77d1e5020057030470a0030500bde8632800ea05002de9db07d1e5010050e3'
+        'da17d1e5020051030410a0030500bde83c42faea05002de9db07d1e5010050e3'
+        'da17d1e5020051030410a0030500bde84642faea03002de9db07d3e5010050e3'
+        'da27d3e5020052030420a0030300bde8f31cfaea03002de9db07d2e5010050e3'
+        'da27d2e5020052030420a0030300bde86cfff9ea03002de9db07dce5010050e3'
+        'da27dce5020052030420a0030300bde87dfff9ea05002de9db07d1e5010050e3'
+        'da17d1e5020051030410a0030500bde89efff9ea05002de9db07d1e5010050e3'
+        'da17d1e5020051030410a0030500bde8ccfff9ea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x0893210,
+        'd9f4ffeb6c101be50400a0e1e0f4ffeb88700be50700a0e1e01701e3ebebffeb'
+        '7010ffe60400a0e1e3f4ffeb0400a0e13810a0e3fef4ffeb0400a0e11c10a0e3'
+        '05f5ffeb0400a0e1881701e3e4f4ffebb81f00e30400a0e1ebf4ffeb64201be5'
+        '0810a0e3',
+        'c83801e30dc0a0e1fe3345e330d82de90050a0e1001093e52c4080e204b04ce2'
+        '0400a0e13e9201eb180595e5040000eb0050a0e10400a0e18e9201eb0500a0e1'
+        '30a89de8003090e5da07d3e5020050e31eff2f11db37d3e5010053e30400a003'
+        '1eff2fe1',
+     'image-size readout for XPan'),
+    (0x0893290,
+        '80301be50b10c2e5be31c2e10530a0e107c0a0e100e093e5103083e20c0013e5'
+        '10c08ce2081013e5042013e5080053e110e00ce50c000ce508100ce504200ce5'
+        'f3ffff1a001093e5',
+        '100403e3010545e397c200e30c0054e15c0b0a03870345031eff2fe1100403e3'
+        '010545e397c200e30c0057e15c0b0a03870345031eff2fe1bcb5875301003c00'
+        '2800000074803300',
+     'XPan icon'),
+    (0x0893310,
+        'c4a084e298340ee30160a0e30a40a0e1fc3345e36c300be50490b4e5018056e2'
+        '0050a0131470a01310a094e50500a0110610a013c601000a60301be5b211c9e1'
+        '5e1da0e3055083e05c301be57550ffe6b401c9e13890a0e3b890cae1032067e0'
+        '022065e00a00a0e1ba20cae1fe1f00eb0a00a0e10710a0e1fe1f00eb0a00a0e1'
+        '3c10a0e3fe1f00eb0a00a0e10510a0e1fe1f00eb010058e3b801000a040056e3'
+        '0100000a016086e2daffffea64401be558a01be5f0c094e50410a0e1c42094e5'
+        '0a00a0e1c0809ce500309ae5c8509ce5801092e8103093e55cc00be5086092e5'
+        'e89094e533ff2fe13a20a0e31c30a0e3b020c8e1842701e3b230c8e1b83f00e3'
+        'b630c8e10410a0e1b420c8e10a00a0e10020a0e38bf6ffebf55501eb000087e5'
+        '000050e30020a0e37e3ea0e348200be50080a0e144200be5facea0e33c200be5'
+        '020ba0e3b6344be1211da0e3be334be1b4c44be1b0044be1bc134be10b0000da'
+        '0210a0e102c087e20a3087e248a04be240e04be2b220ece1011081e2080051e1',
+        '050051e30100000a040051e3a2e6ebea0400a0e30cd04be200a89de804370be3'
+        '873345e30100d3e70cd04be200a89de8040053e30040a0034985ed0a030053e3'
+        '4085edea0440a0e34585edea040053e397220003346be60a030053e32b6be6ea'
+        '0030a0e380c601e30c0050e1503800030120a00300c501e30c0050e1c0370003'
+        '0120a00380c301e30c0050e1303700030120a00380c001e30c0050e118360003'
+        '0220a00300cf00e30c0050e1883500030220a00300cc00e30c0050e170340003'
+        '0320a00380ca00e30c0050e1e03300030320a00300c900e30c0050e150330003'
+        '0320a003000053e3f2feff0a030054e1f0feff1a0230a0e1e49cecea02030401'
+        '0543000001050000581f0055d41f0055ac200055402000551cb787530c000000'
+        '30180000f0080000801600005008000000150000c00700008013000030070000'
+        '50130000200700008010000018060000000f000088050000b00d000010050000'
+        '000c000070040000800a0000e0030000000900005003000080070000c8020000',
+     'RAW Development and Crop: XPan'),
+    (0x089cfa8, 'da47d1e5', '27d8ffea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x089d0c0, 'da27d8e5', 'd9d7ffea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x089d218, 'da77d1e5', '93d7ffea',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x08a44f4, 'f0c788532cc8885324c88853', '1cc888531cc888531cc88853',
+     'live view: whole frame with the crop dimmed'),
+    (0x08e7210,
+        '6e00008a010055e38100000a000056e38600001a030055e34700000a6c3908e3'
+        '201806e3fd3345e3602507e304308be5fd1345e3fd2345e30000a0e37730a0e3'
+        '24d04be2f06b9de8f87800ea640053e33000000a7d0053e3a500000ab20053e3'
+        '4200000a6c3908e3201806e3fd3345e3',
+        '0dc0a0e10020a0e378d82de904b04ce20050a0e10160a0e1043095e5040056e3'
+        '01c0a00300c0a013dbc7c3e5040051e30210a0037d41faeb004050e20600000a'
+        '0500a0e1040056e30210a0030610a0110120a0e1e85cfaeb0040a0e10500a0e1'
+        '0410a0e1f035faeb0400a0e178a89de8',
+     'aspect menu: XPan as a fifth ratio'),
+    (0x08e7300, '0800001a6c3908e3', '0001030204000000',
+     'aspect menu: XPan as a fifth ratio'),
     (0x08e7310,
-     ('602507e300308de5fd1345e3fd2345e33a30a0e3c57800eb000054e3b8ffff0a'
-      '030057e307f19f97470000eaa8f68c5390f68c5378f68c5358f68c53030057e3'
-      '07f19f979f0000ea24f88c5314f88c53e4f78c5334f88c531e2da0e3053ca0e3'
-      'b020c8e1b030c9e124d04be2f0ab9de8000054e35400000ad22ea0e3233da0e3'
-      'b020c8e1b030c9e124d04be2f0ab9de84b2da0e3323da0e3b020c8e1b030c9e1'
-      '24d04be2f0ab9de8702701e3fa3ea0e3b020c8e1b030c9e124d04be2f0ab9de8'
-      '6c3908e3201806e3fd3345e3602507e300308de5fd1345e3fd2345e34630a0e3'
-      '927800eb86ffffea6c3908e3201806e3fd3345e3602507e300308de5fd1345e3'
-      'fd2345e30000a0e33d30a0e3877800ebc0ffffea030057e307f19f975d0000ea'
-      'b8f78c53a4f78c5390f78c537cf78c53030057e307f19f976e0000ea84f88c53'
-      '70f88c5358f88c5344f88c536c3908e3201806e3fd3345e3602507e304308be5'
-      'fd1345e3fd2345e30000a0e35330a0e324d04be2f06b9de86c7800ea1e2da0e3'
-      '5a3ea0e3b020c8e1b030c9e1b5ffffeabb2ea0e3233da0e3b020c8e1b030c9e1'
-      'b0ffffeab02001e3323da0e3b020c8e1b030c9e1abffffead02401e3fa3ea0e3'
-      'b020c8e1b030c9e1a6ffffea010055e3eeffff0a000056e31e00001a030055e3'
-      '4dffff1a233da0e3b030c8e1b030c9e19cffffea000054e3a4ffff1a010055e3'
-      'e7ffff0a000056e31800001a030055e341ffff1a323da0e3b030c8e1b030c9e1'
-      '90ffffeafa3ea0e3b030c8e1b030c9e18cffffea053ca0e3b030c8e1b030c9e1'
-      '88ffffea1e2da0e3383400e3b020c8e1b030c9e183ffffea'),
-     ('0000000000000000000000000000000000000000000000000000000000000000'
-      '0000000000000000000000000000000000000000000000000000000000000000'
-      '00000000000000000000000000000000000000000000000028000000e0010000'
-      '10000000a80200000000000028000000e0010000100000002600000000000000'
-      '02000000e001000002000000a80200000000000002000000e001000002000000'
-      '0000000000000000d00200006b000000100000000000000075010000d0020000'
-      '6b000000100000000000000069000000d0020000020000000200000000000000'
-      '75010000d00200000200000002000000000000000000000078000000e0010000'
-      '10000000580200000000000078000000e0010000100000007600000000000000'
-      '02000000e001000002000000580200000000000002000000e001000002000000'
-      '0dc0a0e1f0d82de904b04ce218d04de20040a0e10150a0e1f430d4e5020053e3'
-      '0900003a0600000a033043e2f430c4e534a4f2ebf430d4e5033083e2f430c4e5'
-      '030000ea49e2f2eb010000ea2da4f2eb1e0000eababce5eb1ebee5ebbf25e7eb'
-      '030050e31900008a00660fe38c6345e3006286e0006386e00470a0e3083096e5'
-      '000053e30e00000a00508de5003096e504308de5043096e508308de5083096e5'
-      '0c308de50c3096e510308de5103096e51430cde5efb0e5eb4cb1e5eb0d10a0e1'
-      '60b3e5eb146086e2017057e2eaffff1a1cd04be2f0a89de80dc0a0e118d82de9'
-      '04b04ce20040a0e1eaa3f2ebf430d4e5033083e2f430c4e514d04be218a89de8'
-      '0600a0e10210a0e31020a0e3e1a3f2eb0150a0e318fee2ea'),
-     'live-view crop marks: 150-word drawing routine and per-ratio dim/line table, written over unused code (the dead Kb588 GetResolution)'),
-    (0x0eb0934, '48885753', '40f78c53',
-     'live-view crop marks: grid view draw -> crop-marks routine (draws the stock grid first)'),
-    (0x01a6e68, '9ea50feb', 'ae011deb',
-     'live-view crop marks: live-view grid setup -> stub that marks the live-view screen'),
-    (0x01a6e18, 'eaffff0a', 'cc011d0a',
-     'live-view crop marks: grid display off keeps the grid view shown, with no grid lines'),
-    (0x0df0dc8, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Czech, length)'),
-    (0x0deed30, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Czech, text)'),
-    (0x0dfbc14, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Danish, length)'),
-    (0x0dfbe44, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Danish, text)'),
-    (0x0e026c4, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (English, length)'),
-    (0x0e04cbc, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (English, text)'),
-    (0x0e0d0e0, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Finnish, length)'),
-    (0x0e12834, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Finnish, text)'),
-    (0x0e1a9a8, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (French, length)'),
-    (0x0e1abf8, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (French, text)'),
-    (0x0e23834, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (German, length)'),
-    (0x0e25804, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (German, text)'),
-    (0x0e2e4d0, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Greek, length)'),
-    (0x0e32c4c, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Greek, text)'),
-    (0x0e39a48, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Hungarian, length)'),
-    (0x0e39dd0, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Hungarian, text)'),
-    (0x0e43e34, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Italian, length)'),
-    (0x0e435f0, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Italian, text)'),
-    (0x0e4c0c0, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Japanese, length)'),
-    (0x0e4e1d4, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Japanese, text)'),
-    (0x0e543b0, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Korean, length)'),
-    (0x0e4fd68, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Korean, text)'),
-    (0x0e58c34, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Dutch, length)'),
-    (0x0e5a5dc, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Dutch, text)'),
-    (0x0e615ac, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Polish, length)'),
-    (0x0e65e38, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Polish, text)'),
-    (0x0e6e3a0, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Portuguese, length)'),
-    (0x0e6d948, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Portuguese, text)'),
-    (0x0e742c8, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Russian, length)'),
-    (0x0e7d0f4, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Russian, text)'),
-    (0x0e806a4, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Chinese-S, length)'),
-    (0x0e81d04, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Chinese-S, text)'),
-    (0x0e86cb8, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Spanish, length)'),
-    (0x0e83618, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Spanish, text)'),
-    (0x0e91974, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Swedish, length)'),
-    (0x0e94ee0, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Swedish, text)'),
-    (0x0e9f600, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Thai, length)'),
-    (0x0e9ddfc, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Thai, text)'),
-    (0x0ea1430, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Chinese-T, length)'),
-    (0x0ea1094, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Chinese-T, text)'),
-    (0x0ea6f98, '05010000', '05010000',
-     'menu label "16:9" -> "XPan" (Turkish, length)'),
-    (0x0ea653c, '310036003a00390000000000', '5800500061006e0000000000',
-     'menu label "16:9" -> "XPan" (Turkish, text)'),
+        '602507e300308de5fd1345e3fd2345e33a30a0e3c57800eb000054e3b8ffff0a'
+        '030057e307f19f97470000eaa8f68c5390f68c5378f68c5358f68c53030057e3'
+        '07f19f979f0000ea24f88c5314f88c53e4f78c5334f88c531e2da0e3053ca0e3'
+        'b020c8e1b030c9e124d04be2f0ab9de8000054e35400000ad22ea0e3233da0e3'
+        'b020c8e1b030c9e124d04be2f0ab9de84b2da0e3323da0e3b020c8e1b030c9e1'
+        '24d04be2f0ab9de8702701e3fa3ea0e3b020c8e1b030c9e124d04be2f0ab9de8'
+        '6c3908e3201806e3fd3345e3602507e300308de5fd1345e3fd2345e34630a0e3'
+        '927800eb86ffffea6c3908e3201806e3fd3345e3602507e300308de5fd1345e3'
+        'fd2345e30000a0e33d30a0e3877800ebc0ffffea030057e307f19f975d0000ea'
+        'b8f78c53a4f78c5390f78c537cf78c53030057e307f19f976e0000ea84f88c53'
+        '70f88c5358f88c5344f88c536c3908e3201806e3fd3345e3602507e304308be5'
+        'fd1345e3fd2345e30000a0e35330a0e324d04be2f06b9de86c7800ea1e2da0e3'
+        '5a3ea0e3b020c8e1b030c9e1b5ffffeabb2ea0e3233da0e3b020c8e1b030c9e1'
+        'b0ffffeab02001e3323da0e3b020c8e1b030c9e1abffffead02401e3fa3ea0e3'
+        'b020c8e1b030c9e1a6ffffea010055e3eeffff0a000056e31e00001a030055e3'
+        '4dffff1a233da0e3b030c8e1b030c9e19cffffea000054e3a4ffff1a010055e3'
+        'e7ffff0a000056e31800001a030055e341ffff1a323da0e3b030c8e1b030c9e1'
+        '90ffffeafa3ea0e3b030c8e1b030c9e18cffffea053ca0e3b030c8e1b030c9e1'
+        '88ffffea1e2da0e3383400e3b020c8e1b030c9e183ffffead22ea0e3763ea0e3'
+        'b020c8e1b030c9e17effffea0000c8424b2da0e3a93ea0e3b020c8e1b030c9e1'
+        '78ffffea702701e3d33ea0e3b020c8e1b030c9e173ffffea6c3908e3201806e3'
+        'fd3345e3602507e3',
+        '0000000000000000000000000000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000000000000000000000000000'
+        '00000000000000000000000000000000000000000000000028000000e0010000'
+        '10000000a80200000000000028000000e0010000100000002600000000000000'
+        '02000000e001000002000000a80200000000000002000000e001000002000000'
+        '0000000000000000d0020000260000001000000000000000ba010000d0020000'
+        '26000000100000000000000024000000d0020000020000000200000000000000'
+        'ba010000d00200000200000002000000000000000000000078000000e0010000'
+        '10000000580200000000000078000000e0010000100000007600000000000000'
+        '02000000e001000002000000580200000000000002000000e001000002000000'
+        '0000000000000000d00200006b000000100000000000000075010000d0020000'
+        '6b000000100000000000000069000000d0020000020000000200000000000000'
+        '75010000d002000002000000020000000dc0a0e1f0d82de904b04ce218d04de2'
+        '0040a0e10150a0e1f430d4e5020053e30900003a0600000a033043e2f430c4e5'
+        '20a4f2ebf430d4e5033083e2f430c4e5030000ea35e2f2eb010000ea19a4f2eb'
+        '1e0000eaa6bce5eb0abee5ebab25e7eb040050e31900008a00660fe38c6345e3'
+        '006286e0006386e00470a0e3083096e5000053e30e00000a00508de5003096e5'
+        '04308de5043096e508308de5083096e50c308de50c3096e510308de5103096e5'
+        '1430cde5dbb0e5eb38b1e5eb0d10a0e14cb3e5eb146086e2017057e2eaffff1a'
+        '1cd04be2f0a89de80dc0a0e118d82de904b04ce20040a0e1d6a3f2ebf430d4e5'
+        '033083e2f430c4e514d04be218a89de80600a0e10210a0e31020a0e3cda3f2eb'
+        '0150a0e304fee2ea',
+     'live view: whole frame with the crop dimmed'),
+    (0x0df2894, '50006f006d001b017200200073007400720061006e000000', '5800500061006e0000000000000000000000000000000000',
+     'menu label "XPan" (Czech)'),
+    (0x0df3c44, '0c010000', '05010000',
+     'menu label "XPan" (Czech)'),
+    (0x0dfdc74, '0d010000', '05010000',
+     'menu label "XPan" (Danish)'),
+    (0x0dff418,
+        '420069006c006c006500640066006f0072006d006100740000000000',
+        '5800500061006e000000000000000000000000000000000000000000',
+     'menu label "XPan" (Danish)'),
+    (0x0e036bc, '0d010000', '05010000',
+     'menu label "XPan" (English)'),
+    (0x0e0b5dc,
+        '410073007000650063007400200052006100740069006f0000000000',
+        '5800500061006e000000000000000000000000000000000000000000',
+     'menu label "XPan" (English)'),
+    (0x0e0c778, '0a010000', '05010000',
+     'menu label "XPan" (Finnish)'),
+    (0x0e13e3c, '4b00750076006100730075006800640065000000', '5800500061006e00000000000000000000000000',
+     'menu label "XPan" (Finnish)'),
+    (0x0e167c0, '11010000', '05010000',
+     'menu label "XPan" (French)'),
+    (0x0e1e4c0,
+        '4c006f006e00670075006500750072002f006c00610072006700650075007200'
+        '00000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000'
+        '00000000',
+     'menu label "XPan" (French)'),
+    (0x0e20400,
+        '530065006900740065006e007600650072006800e4006c0074006e0069007300'
+        '00000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000'
+        '00000000',
+     'menu label "XPan" (German)'),
+    (0x0e23fd4, '11010000', '05010000',
+     'menu label "XPan" (German)'),
+    (0x0e2e2cc, '11010000', '05010000',
+     'menu label "XPan" (Greek)'),
+    (0x0e3350c,
+        '9103bd03b103bb03bf03b303af03b1032000a003bb03b503c503c103ce03bd03'
+        '00000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000'
+        '00000000',
+     'menu label "XPan" (Greek)'),
+    (0x0e39c90, '09010000', '05010000',
+     'menu label "XPan" (Hungarian)'),
+    (0x0e3d9a4, '4b00e900700061007200e1006e00790000000000', '5800500061006e00000000000000000000000000',
+     'menu label "XPan" (Hungarian)'),
+    (0x0e44440, '11010000', '05010000',
+     'menu label "XPan" (Italian)'),
+    (0x0e46fdc,
+        '46006f0072006d00610074006f00200069006d006d006100670069006e006500'
+        '00000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000'
+        '00000000',
+     'menu label "XPan" (Italian)'),
+    (0x0e4e79c, 'a230b930da30af30c830d46b00000000', '5800500061006e000000000000000000',
+     'menu label "XPan" (Japanese)'),
+    (0x0e4e8ec, '07010000', '05010000',
+     'menu label "XPan" (Japanese)'),
+    (0x0e50dbc, '05010000', '05010000',
+     'menu label "XPan" (Korean)'),
+    (0x0e547d8, '54d6c1c044be28c700000000', '5800500061006e0000000000',
+     'menu label "XPan" (Korean)'),
+    (0x0e5b050, '10010000', '05010000',
+     'menu label "XPan" (Dutch)'),
+    (0x0e5ecb4,
+        '4200650065006c00640076006500720068006f007500640069006e0067000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000',
+     'menu label "XPan" (Dutch)'),
+    (0x0e66308, '0a010000', '05010000',
+     'menu label "XPan" (Polish)'),
+    (0x0e671ec, '500072006f0070006f00720063006a0065000000', '5800500061006e00000000000000000000000000',
+     'menu label "XPan" (Polish)'),
+    (0x0e6a03c,
+        '520065006c006100e700e3006f00200064006500200041007300700065007400'
+        '6f000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000'
+        '00000000',
+     'menu label "XPan" (Portuguese)'),
+    (0x0e6e4fc, '12010000', '05010000',
+     'menu label "XPan" (Portuguese)'),
+    (0x0e74310, '13010000', '05010000',
+     'menu label "XPan" (Russian)'),
+    (0x0e79cc8,
+        '21043e043e0442043d043e04480435043d04380435042000410442043e044004'
+        '3e043d0400000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000'
+        '0000000000000000',
+     'menu label "XPan" (Russian)'),
+    (0x0e82014, '04010000cc7de653', '05010000cc38df53',
+     'menu label "XPan" (Chinese-S)'),
+    (0x0e89bbc, '12010000', '05010000',
+     'menu label "XPan" (Spanish)'),
+    (0x0e8bf4c,
+        '46006f0072006d00610074006f00200064006500200069006d00610067006500'
+        '6e000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000'
+        '00000000',
+     'menu label "XPan" (Spanish)'),
+    (0x0e911e8,
+        '420072006500640064002d006800f6006a0064006600f60072006800e5006c00'
+        '6c0061006e00640065000000',
+        '5800500061006e00000000000000000000000000000000000000000000000000'
+        '000000000000000000000000',
+     'menu label "XPan" (Swedish)'),
+    (0x0e952a0, '16010000', '05010000',
+     'menu label "XPan" (Swedish)'),
+    (0x0e9941c, '0d010000', '05010000',
+     'menu label "XPan" (Thai)'),
+    (0x0e9aab0,
+        '2d0e310e150e230e320e2a0e480e270e190e200e320e1e0e00000000',
+        '5800500061006e000000000000000000000000000000000000000000',
+     'menu label "XPan" (Thai)'),
+    (0x0ea3b94, '04010000b49ee853', '05010000cc38df53',
+     'menu label "XPan" (Chinese-T)'),
+    (0x0ea6fb0, '0e010000', '05010000',
+     'menu label "XPan" (Turkish)'),
+    (0x0eab400,
+        '4700f6007200fc006e007400fc0020004f00720061006e0031010000',
+        '5800500061006e000000000000000000000000000000000000000000',
+     'menu label "XPan" (Turkish)'),
+    (0x0eaea40, '74803300', '14773300',
+     'XPan icon'),
+    (0x0eb0934, '48885753', '90f78c53',
+     'live view: whole frame with the crop dimmed'),
+    (0x0ff06b8, 'f8fb8c53', '10b28753',
+     'XPan picture: image sizes, RAW crop, previews'),
+    (0x0ff06d0, 'b4008d536c018d53', '54b2875370b28753',
+     'XPan picture: image sizes, RAW crop, previews'),
 ]
 
-# The 16:9 aspect icon (ICONBIN section, 60x40 RGBA) repainted as "XPan".
-ICON_OFFSET = 0x367e4c0
+# The XPan icon (ICONBIN section, 60x40 RGBA), written into space freed by a duplicate icon.
+ICON_OFFSET = 0x3b73cc0
 ICON_BYTES = 9600
-ICON_OLD_SHA256 = '2aa121c9828a6654e60b75c843a868d7bb03b2e209d0b9d71cca6cdb5ee320fa'
+ICON_OLD_SHA256 = '3839b322c6898ec64a94b3929f38a2d0cf10034a6d1118efefb0c83b54b23808'
 ICON_NEW = (
     'eNrtms1PWkEQwPtPqRVsaKzgRxOtVUkUtJEqcrEnidZQKzGx8QtfE5tovCH2ZCONJfFMCcbEEqIF'
     'UUjUxHizBzXBD3TaGbsLDyilh5KH7iRz2Jl9L/vbj5lZHgDwAO6pDg8Pw13UXLwlJaV3SgWv4EUt'
@@ -512,7 +669,7 @@ def patch(source, log=print):
     if sha256(bytes(buf[ICON_OFFSET:ICON_OFFSET + ICON_BYTES])) != ICON_OLD_SHA256:
         raise Refused(f'unexpected original icon at {ICON_OFFSET:#x}')
     buf[ICON_OFFSET:ICON_OFFSET + ICON_BYTES] = icon
-    log(f'  {ICON_OFFSET:#09x}  aspect icon "16:9" -> "XPan" (60x40)')
+    log(f'  {ICON_OFFSET:#09x}  XPan icon (60x40)')
     patched = rezero(bytes(buf))
 
     log('rebuilding container ...')
@@ -559,7 +716,7 @@ def write_atomic(data, out_dir):
 def identify(data, log=print):
     digest = sha256(data)
     names = {OFFICIAL_SHA256: 'official RICOH GR IV 1.11 (unmodified)',
-             UNLOCKED_SHA256: f'GR4-XPanUnlock {VERSION} (16:9 replaced by XPan)', **OTHER_KNOWN}
+             UNLOCKED_SHA256: f'GR4-XPanUnlock {VERSION} (XPan added next to 16:9)', **OTHER_KNOWN}
     log(f'SHA-256  {digest}')
     log(f'bytes    {len(data)}')
     log(f'file     {names.get(digest, "unknown - not produced by this tool and not the official 1.11 file")}')
